@@ -22,7 +22,10 @@ from awq.utils.utils import simple_dispatch_model
 from datasets import load_dataset
 from torch import nn
 import tqdm
-
+from llava.model.builder import prepare_config_for_eval
+from llava.model import LlavaLlamaModel
+from tinychat.models.qwen2 import Qwen2ForCausalLM
+from tinychat.models.nvila_qwen2 import NVILAQwen2
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, help="path of the hf model")
 parser.add_argument("--batch_size", type=int, default=1, help="batch size")
@@ -92,6 +95,12 @@ parser.add_argument(
     default=None,
     help="Path to save act scale",
 )
+parser.add_argument(
+    "--model_base_path",
+    type=str,
+    default=None,
+    help="Path where base model is stored",
+)
 args = parser.parse_args()
 assert (
     args.act_scale_path is not None and len(args.media_path) > 0
@@ -118,42 +127,57 @@ print("Quantization config:", q_config)
 # build model and tokenizer
 
 
-def build_model_and_enc(model_path):
+def build_model_and_enc(model_path, args):
+    kwargs = {"device_map": "auto"}
+    kwargs["torch_dtype"] = torch.bfloat16
     if not os.path.exists(model_path):  # look into ssd
         raise FileNotFoundError(f"{model_path} not found!")
     print(f"* Building model {model_path}")
-
-    # all hf model
-    if vila_10_quant_mode:
-        from llava.model.builder import load_pretrained_model
-        from llava.mm_utils import get_model_name_from_path
-
-        enc, model, image_processor, context_len = load_pretrained_model(
-            model_path=model_path,
-            model_base=None,
-            model_name=get_model_name_from_path(model_path),
-            device="cpu",
-            **{"use_cache": False},
+    lora_cfg_pretrained = AutoConfig.from_pretrained(model_path)        # Note (Haotian): To avoid OOM after huggingface transformers 4.36.2
+    lora_cfg_pretrained.use_cache = False
+    print("Loading LLaVA from base model...")
+    config = AutoConfig.from_pretrained(args.model_base_path)
+    prepare_config_for_eval(config, kwargs)
+    model = LlavaLlamaModel.from_pretrained(args.model_base_path, low_cpu_mem_usage=True, config=config, **kwargs)
+    model = model.to("cpu")
+    enc = model.tokenizer
+    token_num, tokem_dim = model.llm.lm_head.out_features, model.llm.lm_head.in_features
+    if model.llm.lm_head.weight.shape[0] != token_num:
+        model.llm.lm_head.weight = torch.nn.Parameter(
+            torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype)
         )
-    else:
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        # Note (Haotian): To avoid OOM after huggingface transformers 4.36.2
-        config.use_cache = False
-        if "mpt" in config.__class__.__name__.lower():
-            enc = AutoTokenizer.from_pretrained(
-                config.tokenizer_name, trust_remote_code=True
-            )
-        else:
-            enc = AutoTokenizer.from_pretrained(
-                model_path, use_fast=False, trust_remote_code=True
-            )
+        model.llm.embed_tokens.weight = torch.nn.Parameter(
+            torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype)
+        )
+    if os.path.exists(os.path.join(model_path, "non_lora_trainables.bin")):
+        non_lora_trainables = torch.load(
+            os.path.join(model_path, "non_lora_trainables.bin"),
+            map_location="cpu",
+        )
+    non_lora_trainables = {
+        (k[11:] if k.startswith("base_model.") else k): v for k, v in non_lora_trainables.items()
+    }
+    if any(k.startswith("model.model.") for k in non_lora_trainables):
+        non_lora_trainables = {
+            (k[6:] if k.startswith("model.") else k): v for k, v in non_lora_trainables.items()
+        }
+    model.load_state_dict(non_lora_trainables, strict=False)
 
+    from peft import PeftModel
+
+    print("Loading LoRA weights...")
+    model = PeftModel.from_pretrained(model, model_path, device_map="cpu", low_cpu_mem_usage=True)
+    print("Merging LoRA weights...")
+    model = model.merge_and_unload()
+    print("Model is loaded...")
+    merged_model_path = "/home/workspace/NVILA-Lite-2B-merged_adapters"
+    model.save_pretrained(merged_model_path)
+    for name, param in model.llm.named_parameters():
+        print(name, param.shape)
     if args.load_quant:  # directly load quantized weights
         print("Loading pre-computed quantized weights...")
         with init_empty_weights():
-            model = AutoModelForCausalLM.from_config(
-                config=config, torch_dtype=torch.float16, trust_remote_code=True
-            )
+            model = LlavaLlamaModel.from_pretrained(args.model_base_path, config=config, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="auto", low_cpu_mem_usage=True)
         real_quantize_model_weight(
             model, w_bit=args.w_bit, q_config=q_config, init_only=True
         )
@@ -187,20 +211,22 @@ def build_model_and_enc(model_path):
     else:  # fp16 to quantized
         args.run_awq &= not args.load_awq  # if load_awq, no need to run awq
         # Init model on CPU:
-        kwargs = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True}
+        kwargs = {"torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True}
+        new_config = AutoConfig.from_pretrained(merged_model_path)
         if not vila_10_quant_mode:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_path, config=config, trust_remote_code=True, **kwargs
+            model_llm = LlavaLlamaModel.from_pretrained(
+                merged_model_path, config=new_config, trust_remote_code=True, low_cpu_mem_usage= True
             )
-        for name, param in model.named_parameters():
-            print(name, param.shape)
-        model.eval()
+            enc = model.tokenizer
+
+        model_llm.to("cuda").half()
+        model_llm.eval()
 
         if args.run_awq:
             assert args.dump_awq, "Please save the awq results with --dump_awq"
-
+            print(model)
             awq_results = run_awq(
-                model,
+                model_llm,
                 enc,
                 w_bit=args.w_bit,
                 q_config=q_config,
@@ -281,12 +307,13 @@ def main():
             print(f"Found existing Smooth Scales {args.act_scale_path}, skip.")
         else:
             from awq.quantize import get_smooth_scale
-
-            act_scale = get_smooth_scale(args.model_path, args.media_path)
+            model_name = get_model_name_from_path(args.model_path)
+            act_scale = get_smooth_scale(args.model_path, args.model_base_path, args.media_path)
             os.makedirs(os.path.dirname(args.act_scale_path), exist_ok=True)
             torch.save(act_scale, args.act_scale_path)
             print("Save act scales at " + str(args.act_scale_path))
-            args.model_path = args.model_path + "/llm"
+            if not ("lora" in model_name.lower() or "dora" in model_name.lower()) and model_base is None:
+                args.model_path = args.model_path + "/llm"
         if args.dump_awq is None and args.dump_quant is None:
             exit()
 

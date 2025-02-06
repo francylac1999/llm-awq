@@ -49,3 +49,13 @@ def simple_dispatch_model(model, device_map):
     model.hf_device_map = device_map
 
     return model
+
+def get_best_device():
+    if torch.backends.mps.is_available():
+        return "mps"
+    elif torch.cuda.is_available():
+        return "cuda:0"
+    elif torch.xpu.is_available():
+        return "xpu:0"
+    else:
+        return "cpu"

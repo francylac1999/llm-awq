@@ -18,7 +18,7 @@ gen_params = AttributeDict(
         ("top_p", 0.95),  # 1.0 = disabled
         ("tfs_z", 1.00),  # 1.0 = disabled
         ("typical_p", 1.00),  # 1.0 = disabled
-        ("temp", 0.20),  # 1.0 = disabled
+        ("temp", 0.0),  # 1.0 = disabled
         ("repeat_penalty", 1.10),  # 1.0 = disabled
         (
             "repeat_last_n",
@@ -82,4 +82,11 @@ def stream_output(output_stream, time_stats: TimeStats = None):
         prompt_tokens = timing["context_tokens"]
     print("-" * 50)
     print("TTFT: {:.3f} s for {} tokens.".format(timing["context_time"], prompt_tokens))
+    print("Generation time: {:.3f} s for {} tokens.".format(
+        np.sum(timing["generation_time_list"]), timing["total_tokens"] - prompt_tokens
+    ))
+    print("Total: {:.3f} s for {} tokens.".format(
+        timing["context_time"] + np.sum(timing["generation_time_list"]),
+        total_tokens,
+    ))
     return " ".join(output_text), total_tokens

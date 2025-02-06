@@ -37,3 +37,10 @@ def append_str_prefix(x, prefix):
         return [append_str_prefix(y, prefix) for y in x]
     else:
         return x
+
+def try_import(module_name):
+    try:
+        module = importlib.import_module(module_name)
+        return module, ""
+    except Exception as ex:
+        return None, str(ex)

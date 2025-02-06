@@ -13,7 +13,7 @@ from functools import partial
 from tqdm import tqdm
 import numpy as np
 import functools
-
+import os
 
 @torch.no_grad()
 def get_act_scales(model, data):
@@ -184,7 +184,7 @@ def get_smooth_scale(model_path, media):
             ]
         else:
             raise ValueError(f"Unsupported media type: {name}")
-    images = torch.cat(media["video"], dim=1)
+    #images = torch.cat(media["video"], dim=1)
     model.vision_tower = model.vision_tower.eval()
     decoder_layer_scales = get_act_scales(model.vision_tower, images)
     return decoder_layer_scales

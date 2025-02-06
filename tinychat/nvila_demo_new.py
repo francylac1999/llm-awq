@@ -1,7 +1,7 @@
 import argparse
 
 from termcolor import colored
-
+import cv2
 import llava
 from llava import conversation as clib
 from llava.media import Image, Video
@@ -90,112 +90,105 @@ def main(args):
     #print(model)
     device_warmup(args.device)
     tune_llava_patch_embedding(model.vision_tower, device=args.device)
-
+    count = 0
     # Pre-prepare media
-    prompt = []
-    media_files = []
-    #print(args.media)
-    if args.media is not None:
-        for media in args.media or []:
-            if any(media.endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
-                media = Image(media)
-#                print(media.size)
-                media_files.append(media)
-                media_prompt = "<image>"
-            elif any(media.endswith(ext) for ext in [".mp4", ".mkv", ".webm"]):
-                media = Video(media)
-                media_files.append(media)
-                media_prompt = "<vila/video>"
-            else:
-                raise ValueError(f"Unsupported media type: {media}")
-            prompt.append(media)
-    media_num = len(media_files)
-    if args.vis_image:
-        print("=" * 50)
-        print("Input Image:")
-        vis_images(args.media)
-    conversation = [{"from": "human", "value": prompt}]
-    media, media_cfg = model.prepare_media(conversation)
-    #print(media.size)
-    #print(media_cfg)
-    # Prepare streaming
-    stream_generator = NVILAStreamGenerator
-    # Prepare prompt
-    if args.max_seq_len <= 1024:
-        short_prompt = True
-    else:
-        short_prompt = False
-    model_prompter = get_prompter(
-        args.model_type, args.model_path, short_prompt, args.empty_prompt
-    )
-    stop_token_ids = get_stop_token_ids(args.model_type, args.model_path)
-    count = 0
+    for root, _, images in os.walk(args.test_images_folder):
+        #print(root)
+        #print(images)
+        #image_dir = os.path.dirname(file)
+        for image_file in images:
+            if any(image_file.endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
+                media_path = os.path.join(root, image_file)
+                img = cv2.imread(media_path)
+                resized_img = cv2.resize(img, (640, 480))
+                cv2.imwrite(media_path,resized_img)
+                print(f"Elaborate image {media_path}")
+                prompt = []
+                if media_path is not None:
+                    media = Image(media_path)
+                else:
+                    raise ValueError(f"Unsupported media: {media_path}")
+                if args.vis_image:
+                    print("=" * 50)
+                    print("Input Image:")
+                    vis_images([media_path])
+                prompt.append(media)
+                conversation = [{"from": "human", "value": prompt}]
+                media, media_cfg = model.prepare_media(conversation)
+                # Prepare streaming
+                stream_generator = NVILAStreamGenerator
+                # Prepare prompt
+                if args.max_seq_len <= 1024:
+                    short_prompt = True
+                else:
+                    short_prompt = False
+                model_prompter = get_prompter(
+                    args.model_type, args.model_path, short_prompt, args.empty_prompt
+                )
+                stop_token_ids = get_stop_token_ids(args.model_type, args.model_path)
 
-    if args.empty_prompt:
-        input_indicator = "Input: "
-        output_indicator = "Generated: "
-    else:
-        input_indicator = "USER: "
-        output_indicator = "ASSISTANT: "
+                if args.empty_prompt:
+                    input_indicator = "Input: "
+                    output_indicator = "Generated: "
+                else:
+                    input_indicator = "USER: "
+                    output_indicator = "ASSISTANT: "
 
-    count = 0
-    model.eval()
-    time_stats = TimeStats()
-    start_pos = 0
-    print("=" * 50)
-    input_prompt = """
-    You are a robot in a room with multiple people. Your task is to identify individuals who are available for interaction. Use the following criteria to determine the most suitable candidates for interaction: 
-    1. Group Dynamics: Prefer isolated individuals over people in small groups. Two people are likely engaged in a conversation if they are facing each other, maintaining close proximity, and showing body language cues such as hand gestures or mutual gaze. 
-    2. Availability Cues: Focus on individuals who are not engaged in conversations, using a phone or laptop, wearing headphones or reading a book. Cell phones, books and headphones are located close to their hand, face or chest area. 
-    3. Orientation: Prioritize people whose head are directed towards the robot. 
-    4. Proximity: If multiple people meet the above criteria, prioritize those closest to the robot. 
-    Available individuals should come first, sorted by priority based on the established criteria. 
-    If an individual is heavily occluded or not completely visible in the image, they should be considered not available and assigned the lowest priority.
-    Non-available individuals should follow, prioritized as follows: 
-    1. Prioritize individuals who are oriented toward the robot (those facing it with both head and body) over those who are partially or fully turned away. When individuals are at the same distance, prefer the one with a more direct orientation toward the robot. 
-    2. Among individuals with similar orientation (head and body), rank them based on proximity, giving higher priority to those closer to the robot. 
-    In the images, people are identified with bounding boxes and numeric identifiers. The numeric identifier is drawn at the bottom left of each person. 
-    Now, process this image, considering that it originates from a camera located up to you: <image> 
-    Output format. Return a JSON object with two lists: 
-    1. Priority: a list of person numeric identifiers, sorted from most to least suitable for interaction, according to the aforementioned criteria. 
-    2. Availability: a list of binary values (1 = available, 0 = not available). Ensure that individuals with the highest priority appearing first in the list. 
-    If two or more individuals have equal priority, sort them by their numeric identifiers in ascending order. 
-    Explain me the reasoning behind your choices.
-    """
-    #input_prompt = "<image>"+"What does this image represent?"
-    #print(input_prompt)
-    input_prompt = input_indicator + input_prompt
-    print(input_prompt)
-    print("-" * 50)
-    time_stats.show()
+                model.eval()
+                time_stats = TimeStats()
+                start_pos = 0
+                print("=" * 50)
+                input_prompt = """
+                You are a robot in a room with multiple people. Your task is to identify individuals who are available for interaction. Use the following criteria to determine the most suitable candidates for interaction: 
+                1. Group Dynamics: Prefer isolated individuals over people in small groups. Two people are likely engaged in a conversation if they are facing each other, maintaining close proximity, and showing body language cues such as hand gestures or mutual gaze. 
+                2. Availability Cues: Focus on individuals who are not engaged in conversations, using a phone or laptop, wearing headphones or reading a book. Cell phones, books and headphones are located close to their hand, face or chest area. 
+                3. Orientation: Prioritize people whose head are directed towards the robot. 
+                4. Proximity: If multiple people meet the above criteria, prioritize those closest to the robot. 
+                Available individuals should come first, sorted by priority based on the established criteria. 
+                If an individual is heavily occluded or not completely visible in the image, they should be considered not available and assigned the lowest priority.
+                Non-available individuals should follow, prioritized as follows: 
+                1. Prioritize individuals who are oriented toward the robot (those facing it with both head and body) over those who are partially or fully turned away. When individuals are at the same distance, prefer the one with a more direct orientation toward the robot. 
+                2. Among individuals with similar orientation (head and body), rank them based on proximity, giving higher priority to those closer to the robot. 
+                In the images, people are identified with bounding boxes and numeric identifiers. The numeric identifier is drawn at the bottom left of each person. 
+                Now, process this image, considering that it originates from a camera located up to you: <image> 
+                Output format. Return a JSON object with two lists: 
+                1. Priority: a list of person numeric identifiers, sorted from most to least suitable for interaction, according to the aforementioned criteria. 
+                2. Availability: a list of binary values (1 = available, 0 = not available). Ensure that individuals with the highest priority appearing first in the list. 
+                If two or more individuals have equal priority, sort them by their numeric identifiers in ascending order. 
+                Explain me the reasoning behind your choices.
+                """
+                #input_prompt = "<image>"+"What does this image represent?"
+                #print(input_prompt)
+                input_prompt = input_indicator + input_prompt
+                #print(input_prompt)
+                print("-" * 50)
+                time_stats.show()
 
-    model_prompter.insert_prompt(input_prompt)
-    output_stream = stream_generator(
-        model,
-        gen_params,
-        model_prompter.model_input,
-        media,
-        media_cfg,
-        start_pos,
-        device=args.device,
-        stop_token_ids=stop_token_ids,
-        chunk_prefilling=args.chunk_prefilling,
-        quant_llm=args.quant_llm or args.all,
-    )
-    print(output_indicator, end="", flush=True)
-    if count == 0:
-        outputs, total_tokens = stream_output(output_stream, time_stats)
-        time_stats.show()
-    else:
-        outputs, total_tokens = stream_output(output_stream)
-    if args.chunk_prefilling:
-        start_pos += total_tokens
-    if (
-        args.single_round is not True and args.max_seq_len > 512
-    ):  # Only memorize previous conversations when kv_cache_size > 512
-        model_prompter.update_template(outputs, args.chunk_prefilling)
-    count += 1
-
+                model_prompter.insert_prompt(input_prompt)
+                output_stream = stream_generator(
+                    model,
+                    gen_params,
+                    model_prompter.model_input,
+                    media,
+                    media_cfg,
+                    start_pos,
+                    device=args.device,
+                    stop_token_ids=stop_token_ids,
+                    chunk_prefilling=args.chunk_prefilling,
+                    quant_llm=args.quant_llm or args.all,
+                )
+                print(output_indicator, end="", flush=True)
+                outputs, total_tokens = stream_output(output_stream, time_stats)
+                time_stats.show()
+                if args.chunk_prefilling:
+                    start_pos += total_tokens
+                if (
+                    args.single_round is not True and args.max_seq_len > 512
+                ):  # Only memorize previous conversations when kv_cache_size > 512
+                    model_prompter.update_template(outputs, args.chunk_prefilling)
+                count += 1
+        else:
+            continue
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -214,9 +207,6 @@ if __name__ == "__main__":
         "--act_scale_path",
         type=str,
         default="/PATH/TO/SCALE",
-    )
-    parser.add_argument(
-        "--media", type=str, nargs="+", help="Multi-modal input (Video or image path)"
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--max_seq_len", type=int, default=2048)
@@ -255,6 +245,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Use fake quant or real quant for VisionTower",
     )
+    parser.add_argument("--test_images_folder", type=str, default="/home/workspace/social_interaction_dataset/social_interaction_dataset_test/images")
+
     args = parser.parse_args()
     main(args)
 """

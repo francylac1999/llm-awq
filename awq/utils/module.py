@@ -1,3 +1,13 @@
+import torch.nn as nn
+import importlib
+
+def try_import(module_name):
+    try:
+        module = importlib.import_module(module_name)
+        return module, ""
+    except Exception as ex:
+        return None, str(ex)
+        
 def get_op_by_name(module, op_name):
     # get the op by its name relative to the module
     for name, m in module.named_modules():

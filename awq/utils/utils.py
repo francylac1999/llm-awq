@@ -7,6 +7,16 @@ def get_module_by_name_suffix(model, module_name: str):
         if name.endswith(module_name):
             return module
 
+def get_best_device():
+    if torch.backends.mps.is_available():
+        return "mps"
+    elif torch.cuda.is_available():
+        return "cuda:0"
+    elif torch.xpu.is_available():
+        return "xpu:0"
+    else:
+        return "cpu"
+
 
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import add_hook_to_module, AlignDevicesHook

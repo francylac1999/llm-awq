@@ -18,7 +18,7 @@ gen_params = AttributeDict(
         ("top_p", 0.95),  # 1.0 = disabled
         ("tfs_z", 1.00),  # 1.0 = disabled
         ("typical_p", 1.00),  # 1.0 = disabled
-        ("temp", 0.20),  # 1.0 = disabled
+        ("temp", 0.00),  # 1.0 = disabled
         ("repeat_penalty", 1.10),  # 1.0 = disabled
         (
             "repeat_last_n",

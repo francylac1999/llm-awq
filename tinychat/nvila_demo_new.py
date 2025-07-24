@@ -192,10 +192,11 @@ def main(args):
                         continue
                     with open(label_file, "r") as f:
                         content = f.read()
-                        print(content)
+                        #print(content)
                     try:
                         json_str_label = extract_json_block(content)
                         json_str_response = extract_json_block(outputs)
+                        print(json_str_response)
                     except Exception as e:
                         print(f"Error decoding JSON from {label_file}: {e}")
                         continue
@@ -214,6 +215,8 @@ def main(args):
                     count += 1
             else:
                 continue
+    #print(f"Debug: {all_predictions}")
+    #print(f"Debug: {all_ground_truth}")
     evaluator = Evaluator(all_predictions, all_ground_truth)
     results = evaluator.evaluate()
     print(f"Evaluation results: {results}")

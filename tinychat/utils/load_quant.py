@@ -24,6 +24,7 @@ def ckpt_version_check(quant_path):
         print(version_message)
 
 
+
 def mem_efficient_load_checkpoint(
     model: nn.Module,
     ckpts_folder: Union[str, os.PathLike],
@@ -50,6 +51,21 @@ def mem_efficient_load_checkpoint(
         pbar.set_description("Loading checkpoint shards")
         for checkpoint_file in checkpoint_files:
             checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
+            # If the shard file contains a single tensor (common when we
+            # split the state_dict into per-key files), wrap it into a
+            # dict mapping the expected key name -> tensor so
+            # load_state_dict accepts it.
+            if isinstance(checkpoint, torch.Tensor):
+                keyname = os.path.splitext(os.path.basename(checkpoint_file))[0]
+                checkpoint = {keyname: checkpoint}
+            elif not isinstance(checkpoint, dict):
+                # try to coerce mapping-like objects
+                try:
+                    checkpoint = dict(checkpoint)
+                except Exception:
+                    raise TypeError(
+                        f"Unsupported shard type {type(checkpoint)} for {checkpoint_file}."
+                    )
             model.load_state_dict(checkpoint, strict=False)
             # Force Python to clean up.
             del checkpoint
@@ -57,11 +73,7 @@ def mem_efficient_load_checkpoint(
             pbar.update(1)
     return model
 
-
-def load_awq_model(model, checkpoint, w_bit, group_size, device):
-    q_config = {"zero_point": True, "q_group_size": group_size}
-    real_quantize_model_weight(model, w_bit, q_config, init_only=True)
-
+def load_non_quantized_model(model, checkpoint, device):
     if hasattr(model.config, "tie_encoder_decoder"):
         model.config.tie_encoder_decoder = False
     if hasattr(model.config, "tie_word_embeddings"):
@@ -92,7 +104,6 @@ def load_awq_model(model, checkpoint, w_bit, group_size, device):
                 ],
             ).to(device)
     return model
-
 
 def make_quant_linear(module, names, w_bit, groupsize, device, name=""):
     if isinstance(module, WQLinear):

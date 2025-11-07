@@ -10,7 +10,7 @@ from awq.quantize import fake_quant
 from tinychat.models.nvila_qwen2 import NVILAQwen2
 from transformers import AutoConfig
 from tinychat.models.qwen2 import Qwen2ForCausalLM
-from tinychat.utils.load_quant import load_awq_model
+from tinychat.utils.load_quant import load_non_quantized_model #, load_awq_model
 from tinychat.modules import (
     make_quant_norm,
     make_quant_attn,
@@ -62,8 +62,10 @@ def main(args):
     if args.quant_llm or args.all:
         model = NVILAQwen2(config, False).half()
     else:
-        model = NVILAQwen2(config, True).half()
-
+        model = NVILAQwen2(config, False).half()
+        print("Where is my model?1")
+        #print(next(model.llm.parameters()).device)
+        print(next(model.vision_tower.parameters()).device)
     if args.smooth_VT or args.all:
         from awq.quantize import smooth_lm
 
@@ -71,7 +73,7 @@ def main(args):
         smooth_lm(model.vision_tower, act_scales, 0.3)
     if args.quant_llm or args.all:
         model.llm = Qwen2ForCausalLM(model.llm_cfg).half()
-        model.llm = load_awq_model(model.llm, args.quant_path, 4, 128, args.device)
+        #model.llm = load_awq_model(model.llm, args.quant_path, 4, 128, args.device)
         make_quant_attn(model.llm, args.device, True)
         make_quant_norm(model.llm)
         model.llm.cpu()
@@ -86,9 +88,15 @@ def main(args):
             model.vision_tower.vision_tower.vision_model.encoder = QuantSiglipEncoder(
                 model.vision_tower.vision_tower.vision_model.encoder
             )
+    model.llm = Qwen2ForCausalLM(model.llm_cfg).half()
+    print("Where is my model?2")
+    print(next(model.llm.parameters()).device)
+    model.llm = load_non_quantized_model(model.llm, args.llm_checkpoint, args.device)
+    model.llm.cpu()
+    model.llm.resize_token_embeddings(len(model.tokenizer))
     model = model.cuda().eval()
-    device_warmup(args.device)
-    tune_llava_patch_embedding(model.vision_tower, device=args.device)
+    #device_warmup(args.device)
+    #tune_llava_patch_embedding(model.vision_tower, device=args.device)
 
     # Pre-prepare media
     prompt = []
@@ -196,6 +204,13 @@ if __name__ == "__main__":
         "--quant_path",
         type=str,
         default="/data/llm/checkpoints/llava/llava-v1.5-7b-w4-g128-awq.pt",
+    )
+    parser.add_argument(
+        "--llm-checkpoint",
+        dest="llm_checkpoint",
+        type=str,
+        default="/data/llm/checkpoints/llava/llava-v1.5-7b-w4-g128-awq.pt",
+        help="Path to non-quantized LLM checkpoint (accepts --llm-checkpoint or --llm_checkpoint)",
     )
     parser.add_argument(
         "--act_scale_path",

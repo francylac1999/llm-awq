@@ -89,6 +89,7 @@ def main(args):
                     "CLIPEncoderLayer",
                 ],
             ).to(args.device)
+        model.llm = load_non_quantized_model(model.llm, args.llm_checkpoint, args.device)
         model = model.to(args.device)
 
     elif args.precision == "W4A16":
@@ -111,6 +112,8 @@ def main(args):
         make_quant_norm(model.llm)
         # make_fused_mlp(model)
         # make_fused_vision_attn(model,args.device)
+        
+
         model = model.to(args.device)
 
     else:
@@ -217,6 +220,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--quant-path",
+        type=str,
+        default="/data/llm/checkpoints/llava/llava-v1.5-7b-w4-g128-awq.pt",
+    )
+    parser.add_argument(
+        "--llm-checkpoint",
         type=str,
         default="/data/llm/checkpoints/llava/llava-v1.5-7b-w4-g128-awq.pt",
     )

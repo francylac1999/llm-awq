@@ -29,7 +29,7 @@ def tune_llava_patch_embedding(vision_tower, device):
         .to(device)
         .to(patch_embedding.weight.dtype)
     )
-    for i in range(100):
+    for i in range(5):
         patch_embedding(image)
 
 

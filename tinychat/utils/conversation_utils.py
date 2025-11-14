@@ -6,9 +6,9 @@ gen_params = AttributeDict(
     [
         ("seed", -1),  # RNG seed
         ("n_threads", 1),  # TODO: fix this
-        ("n_predict", 512),  # new tokens to predict
+        ("n_predict", 60),  # new tokens to predict
         ("n_parts", -1),  # amount of model parts (-1: determine from model dimensions)
-        ("n_ctx", 512),  # context size
+        ("n_ctx", 700),  # context size
         ("n_batch", 512),  # batch size for prompt processing (must be >=32 to use BLAS)
         ("n_keep", 0),  # number of tokens to keep from initial prompt
         ("n_vocab", 50272),  # vocabulary size
@@ -18,7 +18,7 @@ gen_params = AttributeDict(
         ("top_p", 0.95),  # 1.0 = disabled
         ("tfs_z", 1.00),  # 1.0 = disabled
         ("typical_p", 1.00),  # 1.0 = disabled
-        ("temp", 0.20),  # 1.0 = disabled
+        ("temp", 0.00),  # 1.0 = disabled
         ("repeat_penalty", 1.10),  # 1.0 = disabled
         (
             "repeat_last_n",

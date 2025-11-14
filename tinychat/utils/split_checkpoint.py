@@ -40,10 +40,11 @@ def load_checkpoint(path: Path):
         raise RuntimeError("Unsupported checkpoint format")
 
 
-def sanitize_filename(key: str) -> str:
-    # Keys typically contain dots and alphanumerics which are valid in filenames.
-    # Keep it simple: replace os.sep if present (shouldn't be) and strip leading/trailing spaces.
-    return key.replace(os.sep, "_").strip()
+# NOTE: We intentionally do not sanitize the keys into arbitrary filenames
+# because the loader expects file paths that match the original state_dict
+# keys as closely as possible. We will use the raw key to build the on-disk
+# path (appending ".pt" if missing) and create parent directories when
+# necessary. This preserves exact naming and avoids missing files.
 
 
 def split_checkpoint(input_path: Path, outdir: Path, overwrite: bool = False):
@@ -58,28 +59,59 @@ def split_checkpoint(input_path: Path, outdir: Path, overwrite: bool = False):
     if not isinstance(state_dict, dict):
         raise RuntimeError("Loaded checkpoint is not a state dict mapping")
 
+    # Handle common tied-weight conventions: some checkpoints store only the
+    # token embedding under e.g. 'model.embed_tokens.weight' while the model
+    # expects a separate 'lm_head.weight' key. If lm_head.weight is missing
+    # but we have the embedding, create an alias so the split produces a
+    # corresponding 'lm_head.weight.pt' file.
+    if "lm_head.weight" not in state_dict and "model.embed_tokens.weight" in state_dict:
+        try:
+            state_dict["lm_head.weight"] = state_dict["model.embed_tokens.weight"]
+            print("Added missing key 'lm_head.weight' from 'model.embed_tokens.weight'")
+        except Exception:
+            # Non-fatal: continue without adding
+            pass
+
     keys = list(state_dict.keys())
     print(f"Loaded checkpoint with {len(keys)} keys. Saving to: {outdir}")
-
+    saved = 0
+    skipped = 0
     for k in tqdm(keys, desc="Saving shards"):
         val = state_dict[k]
         # Move to CPU if it's a tensor
         try:
-            if hasattr(val, "cpu"):
+            if isinstance(val, torch.Tensor):
                 val = val.cpu()
         except Exception:
             pass
 
-        filename = sanitize_filename(k) + ".pt"
-        outpath = outdir / filename
+        # Use the raw key name as filename (append .pt if missing).
+        # If the key contains path separators, Path will create nested dirs.
+        filename = k if k.endswith(".pt") else k + ".pt"
+        outpath = outdir / Path(filename)
+
+        # Create parent directories if needed
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+
         if outpath.exists() and not overwrite:
             tqdm.write(f"Skipping existing file: {outpath}")
+            skipped += 1
             continue
+
         # Save single tensor (or object) to its own file
-        torch.save(val, str(outpath))
+        try:
+            torch.save(val, str(outpath))
+        except Exception as e:
+            tqdm.write(f"Failed to save {outpath}: {e}")
+            # continue to next key without incrementing saved
+            continue
+
+        saved += 1
         # Free memory
         del val
         gc.collect()
+
+    print(f"Saved {saved} files; skipped {skipped} existing files.")
 
     print("Done. You can now point --llm-checkpoint to the shard folder.")
 

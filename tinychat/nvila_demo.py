@@ -49,6 +49,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def main(args):
     # Accelerate model initialization
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
     setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
     setattr(torch.nn.LayerNorm, "reset_parameters", lambda self: None)
     torch.nn.init.kaiming_uniform_ = skip
@@ -63,9 +65,6 @@ def main(args):
         model = NVILAQwen2(config, False).half()
     else:
         model = NVILAQwen2(config, False).half()
-        print("Where is my model?1")
-        #print(next(model.llm.parameters()).device)
-        print(next(model.vision_tower.parameters()).device)
     if args.smooth_VT or args.all:
         from awq.quantize import smooth_lm
 
@@ -89,107 +88,101 @@ def main(args):
                 model.vision_tower.vision_tower.vision_model.encoder
             )
     model.llm = Qwen2ForCausalLM(model.llm_cfg).half()
-    print("Where is my model?2")
-    print(next(model.llm.parameters()).device)
     model.llm = load_non_quantized_model(model.llm, args.llm_checkpoint, args.device)
     model.llm.cpu()
     model.llm.resize_token_embeddings(len(model.tokenizer))
     model = model.cuda().eval()
     #device_warmup(args.device)
-    #tune_llava_patch_embedding(model.vision_tower, device=args.device)
+    tune_llava_patch_embedding(model.vision_tower, device=args.device)
 
     # Pre-prepare media
-    prompt = []
-    media_files = []
-    if args.media is not None:
-        for media in args.media or []:
-            if any(media.endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
-                media = Image(media)
-                media_files.append(media)
-                media_prompt = "<image>"
-            elif any(media.endswith(ext) for ext in [".mp4", ".mkv", ".webm"]):
-                media = Video(media)
-                media_files.append(media)
-                media_prompt = "<vila/video>"
-            else:
-                raise ValueError(f"Unsupported media type: {media}")
-            prompt.append(media)
-    media_num = len(media_files)
-    if args.vis_image:
-        print("=" * 50)
-        print("Input Image:")
-        vis_images(args.media)
-    conversation = [{"from": "human", "value": prompt}]
-    media, media_cfg = model.prepare_media(conversation)
-    # Prepare streaming
-    stream_generator = NVILAStreamGenerator
-    # Prepare prompt
-    if args.max_seq_len <= 1024:
-        short_prompt = True
-    else:
-        short_prompt = False
-    model_prompter = get_prompter(
-        args.model_type, args.model_path, short_prompt, args.empty_prompt
-    )
-    stop_token_ids = get_stop_token_ids(args.model_type, args.model_path)
-    count = 0
+    for folder in args.test_images_folder:
+        for root, _, images in os.walk(folder):
+            for image_file in images:
+                if any(image_file.endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
+                    media_path = os.path.join(root, image_file)
+                    print(f"Processing image: {media_path}")
+                    prompt = []
+                    media = Image(media_path)
+                    if args.vis_image:
+                        print("=" * 50)
+                        print("Input Image:")
+                        vis_images([media_path])
+                    prompt.append(media)
+                    conversation = [{"from": "human", "value": prompt}]
+                    media, media_cfg = model.prepare_media(conversation)
+                    # Prepare streaming
+                    stream_generator = NVILAStreamGenerator
+                    # Prepare prompt
+                    if args.max_seq_len <= 1024:
+                        short_prompt = True
+                    else:
+                        short_prompt = False
+                    model_prompter = get_prompter(
+                        args.model_type, args.model_path, short_prompt, args.empty_prompt
+                    )
+                    stop_token_ids = get_stop_token_ids(args.model_type, args.model_path)
 
-    if args.empty_prompt:
-        input_indicator = "Input: "
-        output_indicator = "Generated: "
-    else:
-        input_indicator = "USER: "
-        output_indicator = "ASSISTANT: "
+                    if args.empty_prompt:
+                        input_indicator = "Input: "
+                        output_indicator = "Generated: "
+                    else:
+                        input_indicator = "USER: "
+                        output_indicator = "ASSISTANT: "
 
-    count = 0
-    model.eval()
-    time_stats = TimeStats()
-    start_pos = 0
-    while True:
-        # Get input from the user
-        print("=" * 50)
-        input_prompt = input(input_indicator)
-        print("-" * 50)
-        if input_prompt == "":
-            print("EXIT...")
-            time_stats.show()
-            break
-        if count == 0:  # Insert media here
-            if args.media is not None:
-                if media_prompt in input_prompt:
-                    input_prompt = input_prompt
-                else:
-                    input_prompt = media_prompt * media_num + input_prompt
-            model_prompter.insert_prompt(input_prompt)
-        else:
-            model_prompter.insert_prompt(input_prompt)
-            if args.chunk_prefilling:
-                media = None
-                media_cfg = None
-        output_stream = stream_generator(
-            model,
-            gen_params,
-            model_prompter.model_input,
-            media,
-            media_cfg,
-            start_pos,
-            device=args.device,
-            stop_token_ids=stop_token_ids,
-            chunk_prefilling=args.chunk_prefilling,
-            quant_llm=args.quant_llm or args.all,
-        )
-        print(output_indicator, end="", flush=True)
-        if count == 0:
-            outputs, total_tokens = stream_output(output_stream, time_stats)
-        else:
-            outputs, total_tokens = stream_output(output_stream)
-        if args.chunk_prefilling:
-            start_pos += total_tokens
-        if (
-            args.single_round is not True and args.max_seq_len > 512
-        ):  # Only memorize previous conversations when kv_cache_size > 512
-            model_prompter.update_template(outputs, args.chunk_prefilling)
-        count += 1
+                    # Get the correct image token for this model
+                    image_token = get_image_token(args.model_type, args.model_path)
+                    print(f"Using image token: {image_token}")
+                    
+                    # Definizione delle parti costanti del prompt
+                    input_prompt = f"""You are a robot in a room with multiple people. Your task is to identify individuals who are available for interaction. Use the following criteria to determine the most suitable candidates for interaction: 
+                                    1. Group Dynamics: Prefer isolated individuals over people in small groups. Two people are likely engaged in a conversation if they are facing each other, maintaining close proximity, and showing body language cues such as hand gestures or mutual gaze. 
+                                    2. Availability Cues: Focus on individuals who are not engaged in conversations, using a phone or laptop, wearing headphones or reading a book. Cell phones, books and headphones are located close to their hand, face or chest area. 
+                                    3. Orientation: Prioritize people whose head are directed towards the robot. 
+                                    4. Proximity: If multiple people meet the above criteria, prioritize those closest to the robot. 
+                                    Available individuals should come first, sorted by priority based on the established criteria. 
+                                    If an individual is heavily occluded or not completely visible in the image, they should be considered not available and assigned the lowest priority.
+                                    Non-available individuals should follow, prioritized as follows: 
+                                    1. Prioritize individuals who are oriented toward the robot (those facing it with both head and body) over those who are partially or fully turned away. When individuals are at the same distance, prefer the one with a more direct orientation toward the robot. 
+                                    2. Among individuals with similar orientation (head and body), rank them based on proximity, giving higher priority to those closer to the robot. 
+                                    In the images, people are identified with bounding boxes and numeric identifiers. The numeric identifier is drawn at the bottom left of each person. 
+                                    Now, process this image, considering that it originates from a camera located up to you: {image_token}
+                                    Output format. Return a JSON object with two lists: 
+                                    1. Priority: a list of person numeric identifiers, sorted from most to least suitable for interaction, according to the aforementioned criteria. 
+                                    2. Availability: a list of binary values (1 = available, 0 = not available). Ensure that individuals with the highest priority appearing first in the list. 
+                                    If two or more individuals have equal priority, sort them by their numeric identifiers in ascending order. 
+                                    Explain me the reasoning behind your choices.
+                                    """
+                    print("=" * 50)
+                    # Build the prompt
+                    input_prompt = input_indicator + input_prompt
+                    print("-" * 50)
+                    model_prompter.insert_prompt(input_prompt)
+                    model.eval()
+                    time_stats = TimeStats()
+                    time_stats.show()
+                    start_pos = 0
+                    # For this implementation, we always use the media since each image is processed independently
+                    output_stream = stream_generator(
+                        model,
+                        gen_params,
+                        model_prompter.model_input,
+                        media,
+                        media_cfg,
+                        start_pos,
+                        device=args.device,
+                        stop_token_ids=stop_token_ids,
+                        chunk_prefilling=args.chunk_prefilling,
+                        quant_llm=args.quant_llm or args.all,
+                    )
+                    print(output_indicator, end="", flush=True)
+                    outputs, total_tokens = stream_output(output_stream, time_stats)
+                    if args.chunk_prefilling:
+                        start_pos += total_tokens
+                    if (
+                        args.single_round is not True and args.max_seq_len > 512
+                    ):  # Only memorize previous conversations when kv_cache_size > 512
+                        model_prompter.update_template(outputs, args.chunk_prefilling)
 
 
 if __name__ == "__main__":
@@ -247,6 +240,13 @@ if __name__ == "__main__":
         action="store_true",
         help="If used, in context stage, the history tokens will not be recalculated, greatly speeding up the calculation",
     )
+    parser.add_argument(
+        "--test_images_folder",
+        type=str,
+        nargs="+",
+        help="Folder containing test images",
+        default = ["/home/workspace/social_interaction_dataset/social_interaction_dataset_test/images/","/home/workspace/social_interaction_dataset_1/social_interaction_dataset_1_test/images/"]
+    )
     # smooth and quantization options
     parser.add_argument("--quant_llm", action="store_true")
     parser.add_argument("--quant_VT", action="store_true")
@@ -256,6 +256,12 @@ if __name__ == "__main__":
         "--fakequant_VT",
         action="store_true",
         help="Use fake quant or real quant for VisionTower",
+    )
+    parser.add_argument(
+        "--custom_stop_token",
+        type=bool,
+        help="Custom stop token for text generation",  
+        default=True,         
     )
     args = parser.parse_args()
     main(args)

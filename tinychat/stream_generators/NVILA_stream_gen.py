@@ -43,6 +43,8 @@ def NVILAStreamGenerator(
     past_key_values = out = None
     stop_token_ids.append(model.tokenizer.eos_token_id)
     max_new_tokens = gen_params.n_predict
+    # If we see token 335, we should stop at the next generated token.
+    stop_on_next = False
 
     for i in range(max_new_tokens):
         torch.cuda.synchronize()
@@ -104,10 +106,19 @@ def NVILAStreamGenerator(
         else:
             generation_time_list.append(t_ed - t_st)
 
+        # Stop if current token is an explicit stop id, or if a previous
+        # generation set the "stop_on_next" flag because it encountered 335.
         if token in stop_token_ids:
+            stopped = True
+        elif stop_on_next:
             stopped = True
         else:
             stopped = False
+
+        # If current token is 335 we mark to stop on the next generated token
+        # (do not stop immediately on 335 itself).
+        if token == 335:
+            stop_on_next = True
 
         if i % stream_interval == 0 or i == max_new_tokens - 1 or stopped:
             if echo:
@@ -150,6 +161,7 @@ def NVILAStreamGenerator(
         finish_reason = None
 
     total_tokens = context_tokens + len(generation_time_list)
+    
     yield {
         "text": output,
         "usage": {
@@ -165,6 +177,43 @@ def NVILAStreamGenerator(
             "generation_time_list": generation_time_list,
         },
     }
+
+    # Print detailed generation statistics
+    try:
+        gen_times = list(generation_time_list) if generation_time_list is not None else []
+        gen_tokens = len(gen_times)
+        total_gen_time = float(sum(gen_times)) if gen_times else 0.0
+        avg_time = total_gen_time / gen_tokens if gen_tokens else 0.0
+        median_time = 0.0
+        min_time = 0.0
+        max_time = 0.0
+        if gen_tokens:
+            sorted_times = sorted(gen_times)
+            median_time = sorted_times[gen_tokens // 2]
+            min_time = sorted_times[0]
+            max_time = sorted_times[-1]
+
+        tokens_per_sec = gen_tokens / total_gen_time if total_gen_time > 0 else (float('inf') if gen_tokens > 0 else 0.0)
+
+        total_time = float(context_time) + total_gen_time
+        generated_tokens = gen_tokens
+
+        print("\n=== Generation statistics ===")
+        print(f"Context tokens: {context_tokens}")
+        print(f"Context time (s): {context_time:.4f}")
+        print(f"Generated tokens: {generated_tokens}")
+        print(f"Total tokens: {total_tokens}")
+        print(f"Total time (s): {total_time:.4f}")
+        print("-- per-token generation time (s) --")
+        print(f"  mean: {avg_time:.6f}")
+        print(f"  median: {median_time:.6f}")
+        print(f"  min: {min_time:.6f}")
+        print(f"  max: {max_time:.6f}")
+        print(f"Generation speed (tokens/sec): {tokens_per_sec:.2f}")
+        print("==============================\n")
+    except Exception:
+        # Best-effort stats printing; do not fail the generator if something goes wrong
+        pass
 
     del past_key_values, out
     gc.collect()

@@ -33,31 +33,49 @@ def mem_efficient_load_checkpoint(
         ckpts_folder + "/" + f for f in os.listdir(ckpts_folder) if f.endswith(".pt")
     ]
 
-    # Check if the ckpts match the model
-    model_keys = sorted((list(model.state_dict().keys())))
-    suffix = r"\.pt$"
-    ckpt_keys = sorted(
-        [re.sub(suffix, "", f) for f in os.listdir(ckpts_folder) if f.endswith(".pt")]
-    )
-    assert len(model_keys) == len(
-        ckpt_keys
-    ), f"The number of checkpoint files do not match the model. \n Model has {len(model_keys)} keys, while finding {len(ckpt_keys)} checkpoint files in the folder."
-    for key1, key2 in zip(model_keys, ckpt_keys):
-        assert (
-            key1 == key2
-        ), f"The checkpoint files do not match the model. \nmodel key {key1} != checkpoint key {key2}"
+    # Prepare model keys and a mapping of available checkpoint files
+    model_keys = list(model.state_dict().keys())
+    # map from key -> filepath if present
+    ckpt_map = {
+        os.path.splitext(f)[0]: os.path.join(ckpts_folder, f)
+        for f in os.listdir(ckpts_folder)
+        if f.endswith(".pt")
+    }
 
-    with tqdm(total=len(checkpoint_files)) as pbar:
+    missing = [k for k in model_keys if k not in ckpt_map]
+    extra = [k for k in ckpt_map.keys() if k not in model_keys]
+    if missing:
+        print(f"Warning: {len(missing)} model keys are missing in checkpoint folder. Missing keys sample: {missing[:10]}")
+    if extra:
+        print(f"Note: {len(extra)} extra checkpoint files were found that don't match model keys. Extra sample: {extra[:10]}")
+
+    # Heuristic: detect AWQ / quantized shard formats (qweight/scales/scaled_zeros)
+    # If present, abort with an informative error because mem_efficient_load_checkpoint
+    # is intended to load per-key float tensors (one .pt per state_dict key).
+    awq_indicators = (".qweight", ".scales", ".scaled_zeros", "qweight", "scales", "scaled_zeros")
+    found_awq = any(any(ind in name for ind in awq_indicators) for name in extra)
+    if found_awq:
+        raise RuntimeError(
+            "Checkpoint folder appears to contain quantized AWQ shards (qweight/scales/...).\n"
+            "mem_efficient_load_checkpoint expects a folder of per-key float .pt files (one file per state_dict key).\n"
+            "If you have an AWQ quantized checkpoint, load it with the AWQ loader (e.g. load_awq_model) or provide the non-quantized per-key shards.\n"
+        )
+
+    # Load files in the order of model_keys so load_state_dict updates correctly
+    total_to_load = len([k for k in model_keys if k in ckpt_map])
+    with tqdm(total=total_to_load) as pbar:
         pbar.set_description("Loading checkpoint shards")
-        for checkpoint_file in checkpoint_files:
+        for key in model_keys:
+            if key not in ckpt_map:
+                continue
+            checkpoint_file = ckpt_map[key]
             checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
             # If the shard file contains a single tensor (common when we
             # split the state_dict into per-key files), wrap it into a
             # dict mapping the expected key name -> tensor so
             # load_state_dict accepts it.
             if isinstance(checkpoint, torch.Tensor):
-                keyname = os.path.splitext(os.path.basename(checkpoint_file))[0]
-                checkpoint = {keyname: checkpoint}
+                checkpoint = {key: checkpoint}
             elif not isinstance(checkpoint, dict):
                 # try to coerce mapping-like objects
                 try:
@@ -71,6 +89,8 @@ def mem_efficient_load_checkpoint(
             del checkpoint
             gc.collect()
             pbar.update(1)
+    if missing:
+        print("Warning: model may be incomplete due to missing keys in checkpoint folder.")
     return model
 
 def load_non_quantized_model(model, checkpoint, device):
